@@ -313,14 +313,19 @@ def latest():
     return jsonify({"ts": ts, "symbol": sym, "market_snapshot": snap_obj, "ai": ai_obj}), 200
 
 def _check_admin_token(req):
+    # Accept token in query param or Authorization header
     token = req.args.get("token", "")
+    if not token:
+        auth = req.headers.get("Authorization", "")
+        if auth.lower().startswith("bearer "):
+            token = auth.split(" ", 1)[1].strip()
     if not ADMIN_TOKEN:
         return False, ("admin token not set on server", 403)
     if token != ADMIN_TOKEN:
         return False, ("forbidden", 403)
     return True, None
 
-@app.route("/pause")
+@app.route("/pause", methods=["POST", "GET"])
 def pause():
     ok, err = _check_admin_token(request)
     if not ok:
@@ -328,10 +333,18 @@ def pause():
     global SCHED
     if not SCHED:
         return ("no scheduler", 500)
-    SCHED.pause()
-    return ("paused", 200)
+    try:
+        # Pause all jobs
+        for j in SCHED.get_jobs():
+            try:
+                SCHED.pause_job(j.id)
+            except Exception:
+                pass
+        return ("paused", 200)
+    except Exception as e:
+        return (f"pause error: {e}", 500)
 
-@app.route("/resume")
+@app.route("/resume", methods=["POST", "GET"])
 def resume():
     ok, err = _check_admin_token(request)
     if not ok:
@@ -339,10 +352,18 @@ def resume():
     global SCHED
     if not SCHED:
         return ("no scheduler", 500)
-    SCHED.resume()
-    return ("resumed", 200)
+    try:
+        # Resume all jobs
+        for j in SCHED.get_jobs():
+            try:
+                SCHED.resume_job(j.id)
+            except Exception:
+                pass
+        return ("resumed", 200)
+    except Exception as e:
+        return (f"resume error: {e}", 500)
 
-@app.route("/run-now")
+@app.route("/run-now", methods=["POST", "GET"])
 def run_now():
     ok, err = _check_admin_token(request)
     if not ok:
@@ -356,21 +377,24 @@ def run_now():
 # ========== SCHEDULER START ==========
 def start_scheduler():
     global SCHED
+    if SCHED:
+        return
     SCHED = BackgroundScheduler(timezone=TIMEZONE)
-    SCHED.add_job(job, "interval", seconds=POLL_INTERVAL_SECONDS, args=[SYMBOLS])
+    SCHED.add_job(job, "interval", seconds=POLL_INTERVAL_SECONDS, args=[SYMBOLS], id="deepak_job")
     try:
         refresh_hours = float(os.getenv("GROWW_REFRESH_HOURS", str(GROWW_REFRESH_HOURS)))
     except:
         refresh_hours = GROWW_REFRESH_HOURS
-    SCHED.add_job(lambda: refresh_groww_token_if_needed(), "interval", hours=refresh_hours)
+    SCHED.add_job(lambda: refresh_groww_token_if_needed(), "interval", hours=refresh_hours, id="refresh_token_job")
     SCHED.start()
     print(f"[Deepak] Scheduler started: polling every {POLL_INTERVAL_SECONDS}s; token refresh every {refresh_hours}h")
 
 # ========== APP ENTRYPOINT ==========
 if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))  # Render-compatible port binding
     print("[Deepak] Starting watchdog. Symbols:", SYMBOLS, "Polls every:", POLL_INTERVAL_SECONDS)
     try:
         start_scheduler()
     except Exception as e:
         print("[Deepak] Scheduler failed to start:", e)
-    app.run(host="0.0.0.0", port=port), port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
