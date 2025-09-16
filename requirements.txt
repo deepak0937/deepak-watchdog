@@ -3,5 +3,4 @@ uvicorn[standard]==0.23.2
 requests==2.31.0
 sqlalchemy==2.0.20
 psycopg2-binary==2.9.7
-gunicorn
-uvicorn
+gunicorn==20.1.0
