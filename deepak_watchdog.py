@@ -373,4 +373,4 @@ if __name__ == "__main__":
         start_scheduler()
     except Exception as e:
         print("[Deepak] Scheduler failed to start:", e)
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")))
+    app.run(host="0.0.0.0", port=port), port = int(os.environ.get("PORT", 5000))
