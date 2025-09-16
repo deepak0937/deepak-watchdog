@@ -1,12 +1,9 @@
 """
-deepak_watchdog.py
-Safe Groww -> OpenAI watchdog (manual trading only).
-Features:
- - Auto-refresh Groww token using Key+Secret (stores token in SQLite)
- - Polls Groww for quotes at configured interval, asks OpenAI for single JSON decision
- - Logs decisions to SQLite
- - Exposes /latest, /pause, /resume, /run-now endpoints (admin-token protected)
- - NEVER places orders (manual trading only)
+Deepak Watchdog - updated version
+- Robust env handling for Groww keys and tokens
+- Try multiple Groww endpoints for quotes
+- Safe OpenAI handling (won't crash if OPENAI_KEY missing)
+- Validate webhook URL before posting
 """
 
 import os
@@ -26,8 +23,11 @@ TIMEZONE = os.getenv("TZ", "Asia/Kolkata")
 # Groww / token config
 GROWW_BASE = os.getenv("GROWW_BASE", "https://api.groww.in")  # base; endpoints below append path
 GROWW_TOKEN_URL = os.getenv("GROWW_TOKEN_URL", f"{GROWW_BASE}/v1/api/token")
-# Credentials (store in Render env vars)
-# GROWW_KEY, GROWW_SECRET, GROWW_TOKEN (optional fallback)
+# Accept multiple env names for compatibility
+# Preferred names: GROWW_KEY, GROWW_SECRET
+# Alternate names you may have used: GROWW_API_KEY, GROWW_SECRET_KEY
+# Also GROWW_TOKEN may hold an existing token
+# (The refresh function below will auto-detect these env vars.)
 
 # OpenAI config
 OPENAI_KEY = os.getenv("OPENAI_KEY")
@@ -50,7 +50,7 @@ except:
 # Telegram/Webhook (optional)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # if provided, must be a valid http(s) url
 
 # ========== DATABASE ==========
 def init_db():
@@ -85,15 +85,23 @@ def telegram_notify(text):
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10)
+        resp = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10)
+        if resp.status_code != 200:
+            print("[Notify] Telegram returned", resp.status_code, resp.text)
     except Exception as e:
         print("[Notify] telegram error:", e)
 
 def webhook_notify(payload):
     if not WEBHOOK_URL:
         return
+    # very basic validation: must start with http:// or https://
+    if not WEBHOOK_URL.startswith("http://") and not WEBHOOK_URL.startswith("https://"):
+        print("[Notify] webhook error: Invalid URL (no scheme):", WEBHOOK_URL)
+        return
     try:
-        requests.post(WEBHOOK_URL, json=payload, timeout=8)
+        resp = requests.post(WEBHOOK_URL, json=payload, timeout=8)
+        if resp.status_code >= 300:
+            print("[Notify] webhook returned", resp.status_code, resp.text)
     except Exception as e:
         print("[Notify] webhook error:", e)
 
@@ -142,9 +150,9 @@ def refresh_groww_token_if_needed():
         except Exception as e:
             print("[Deepak] Failed storing env token:", e)
 
-    # 3) refresh via key + secret
-    key = os.getenv("GROWW_KEY")
-    secret = os.getenv("GROWW_SECRET")
+    # 3) refresh via key + secret (support multiple env names)
+    key = os.getenv("GROWW_KEY") or os.getenv("GROWW_API_KEY") or os.getenv("GROWW_CLIENT_ID")
+    secret = os.getenv("GROWW_SECRET") or os.getenv("GROWW_SECRET_KEY") or os.getenv("GROWW_CLIENT_SECRET")
     token_url = os.getenv("GROWW_TOKEN_URL", GROWW_TOKEN_URL)
     if not key or not secret:
         raise Exception("No stored token and missing GROWW_KEY / GROWW_SECRET to refresh token.")
@@ -183,29 +191,68 @@ def refresh_groww_token_if_needed():
 # ========== GROWW DATA FETCH ==========
 def fetch_groww_quote(symbol="NIFTY"):
     """
-    Replace endpoint path if Groww docs specify different path.
-    Typical pattern: GET /v1/stocks_data/quotes?symbol=...
+    Attempt multiple endpoint variants to fetch a quote for symbol.
+    Returns JSON or raises an exception.
     """
     token = refresh_groww_token_if_needed()
-    url = f"{GROWW_BASE}/v1/stocks_data/quotes"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "X-Client-Id": os.getenv("GROWW_KEY")
-    }
+    # Candidate endpoints to try in order (some Groww installations use slightly different paths)
+    candidate_paths = [
+        "/v1/api/stocks_data/v2/quotes",   # try this first (common)
+        "/v1/stocks_data/quotes",          # fallback (older attempt)
+        "/v1/api/market/quotes",           # another possible variant (fallback)
+    ]
+
     params = {"symbol": symbol}
-    try:
-        r = requests.get(url, headers=headers, params=params, timeout=10)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        print("[Deepak] fetch_groww_quote error:", e)
-        raise
+    last_exc = None
+    for path in candidate_paths:
+        url = f"{GROWW_BASE}{path}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Client-Id": os.getenv("GROWW_KEY") or os.getenv("GROWW_API_KEY") or ""
+        }
+        try:
+            r = requests.get(url, headers=headers, params=params, timeout=10)
+            if r.status_code == 404:
+                # try next candidate
+                print(f"[Deepak] fetch_groww_quote: endpoint {path} returned 404, trying next...")
+                last_exc = Exception(f"404 for {url}")
+                continue
+            r.raise_for_status()
+            return r.json()
+        except requests.exceptions.HTTPError as he:
+            # if 4xx other than 404, bubble up faster
+            status = getattr(he.response, "status_code", None)
+            print(f"[Deepak] fetch_groww_quote HTTPError for {url}: {status} {he}")
+            last_exc = he
+            if status and status >= 400 and status < 500 and status != 404:
+                # client error (unauthorized etc) - return / raise
+                raise
+            # else continue to next candidate
+        except Exception as e:
+            print(f"[Deepak] fetch_groww_quote error for {url}:", e)
+            last_exc = e
+            # continue to next candidate
+
+    # If we exhausted all candidates, raise the last exception
+    if last_exc:
+        raise last_exc
+    else:
+        raise Exception("No Groww endpoints to try")
 
 # ========== OPENAI CALL ==========
 def ask_openai_for_decision(market_snapshot, symbol):
     """
     Deterministic prompt: returns strict JSON. Low temperature for determinism.
+    If OPENAI_KEY not set, returns a safe FLAT decision instead of crashing.
     """
+    if not OPENAI_KEY:
+        print("[Deepak] OPENAI_KEY not set. Returning safe FLAT decision.")
+        return (
+            {"decision": "FLAT", "instrument": symbol, "qty": 0, "entry_price": None, "stoploss": None,
+             "rationale": "OpenAI key missing. Defaulting to FLAT.", "confidence_percent": 0},
+            "OpenAI key missing"
+        )
+
     system = (
         "You are Deepak Lab assistant. Output STRICT JSON only with keys: "
         '{"decision","instrument","qty","entry_price","stoploss","rationale","confidence_percent"}. '
@@ -248,21 +295,31 @@ def job(symbols=None):
         try:
             snap = fetch_groww_quote(sym)
         except Exception as e:
+            print("[Deepak] fetch_groww_quote error:", e)
             snap = {"error": str(e)}
         ai_json, ai_raw = ask_openai_for_decision(snap, sym)
 
         # persist decision
-        cur = DB.cursor()
-        cur.execute(
-            "INSERT INTO decisions(ts,symbol,market_snapshot,ai_json,ai_raw) VALUES (?,?,?,?,?)",
-            (ts, sym, json.dumps(snap), json.dumps(ai_json), ai_raw[:2000])
-        )
-        DB.commit()
+        try:
+            cur = DB.cursor()
+            cur.execute(
+                "INSERT INTO decisions(ts,symbol,market_snapshot,ai_json,ai_raw) VALUES (?,?,?,?,?)",
+                (ts, sym, json.dumps(snap), json.dumps(ai_json), ai_raw[:2000])
+            )
+            DB.commit()
+        except Exception as e:
+            print("[Deepak] DB write error:", e)
 
         brief = f"[Deepak Watchdog] {ts} | {sym} | decision={ai_json.get('decision')} | qty={ai_json.get('qty')}"
         print(brief)
-        telegram_notify(brief)
-        webhook_notify({"ts": ts, "symbol": sym, "ai": ai_json})
+        try:
+            telegram_notify(brief)
+        except Exception as e:
+            print("[Notify] telegram failed:", e)
+        try:
+            webhook_notify({"ts": ts, "symbol": sym, "ai": ai_json})
+        except Exception as e:
+            print("[Notify] webhook failed:", e)
 
 # ========== FLASK APP & ADMIN CONTROL ==========
 app = Flask(__name__)
@@ -284,7 +341,11 @@ def latest():
         snap_obj = json.loads(snap)
     except:
         snap_obj = snap
-    return jsonify({"ts": ts, "symbol": sym, "market_snapshot": snap_obj, "ai": json.loads(ai_json)}), 200
+    try:
+        ai_obj = json.loads(ai_json)
+    except:
+        ai_obj = ai_json
+    return jsonify({"ts": ts, "symbol": sym, "market_snapshot": snap_obj, "ai": ai_obj}), 200
 
 def _check_admin_token(req):
     token = req.args.get("token", "")
@@ -307,45 +368,4 @@ def pause():
 
 @app.route("/resume")
 def resume():
-    ok, err = _check_admin_token(request)
-    if not ok:
-        return err
-    global SCHED
-    if not SCHED:
-        return ("no scheduler", 500)
-    SCHED.resume()
-    return ("resumed", 200)
-
-@app.route("/run-now")
-def run_now():
-    ok, err = _check_admin_token(request)
-    if not ok:
-        return err
-    # run job immediately in background (non-blocking)
-    try:
-        # call job once
-        job(SYMBOLS)
-        return ("job triggered", 200)
-    except Exception as e:
-        return (f"job error: {e}", 500)
-
-# ========== SCHEDULER START ==========
-def start_scheduler():
-    global SCHED
-    SCHED = BackgroundScheduler(timezone=TIMEZONE)
-    SCHED.add_job(job, "interval", seconds=POLL_INTERVAL_SECONDS, args=[SYMBOLS])
-    # token refresh job
-    try:
-        refresh_hours = float(os.getenv("GROWW_REFRESH_HOURS", str(GROWW_REFRESH_HOURS)))
-    except:
-        refresh_hours = GROWW_REFRESH_HOURS
-    SCHED.add_job(lambda: refresh_groww_token_if_needed(), "interval", hours=refresh_hours)
-    SCHED.start()
-    print(f"[Deepak] Scheduler started: polling every {POLL_INTERVAL_SECONDS}s; token refresh every {refresh_hours}h")
-
-# ========== APP ENTRYPOINT ==========
-if __name__ == "__main__":
-    # print config summary (non-sensitive)
-    print("[Deepak] Starting watchdog. Symbols:", SYMBOLS, "Polls every:", POLL_INTERVAL_SECONDS)
-    start_scheduler()
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")))
+    ok,
