@@ -398,26 +398,19 @@ async def shutdown(request: Request):
     if token != ADMIN_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
     logger.warning("Shutdown requested by admin token")
-    # graceful exit
+   # ---------- Routes ---------- (already above)
+
+@app.post("/shutdown")
+async def shutdown(request: Request):
+    token = _extract_admin_token(request)
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    logger.warning("Shutdown requested by admin token")
     os.kill(os.getpid(), 15)
     return {"shutdown": "requested"}
 
-# ---------- Startup / Shutdown ----------
-@app.on_event("startup")
-async def on_startup():
-    logger.info("Deepak Watchdog starting; ADMIN_TOKEN set: %s; DB enabled: %s; OPENAI set: %s",
-                bool(ADMIN_TOKEN), bool(engine), bool(OPENAI_API_KEY))
 
-@app.on_event("shutdown")
-async def on_shutdown():
-    logger.info("Deepak Watchdog shutting down")
-
-# ---------- Local run entry ----------
-if __name__ == "__main__":
-    import uvicorn
-    logger.info("Starting uvicorn on 0.0.0.0:%s", PORT)
-    uvicorn.run("deepak_watchdog:app", host="0.0.0.0", port=PORT, log_level="info")
-    # ---------- quick test endpoint for /groww/quote ----------
+# ---------- quick test endpoint for /groww/quote ----------
 from fastapi import Query
 
 @app.get("/groww/quote")
@@ -434,5 +427,25 @@ async def groww_quote(
         "segment": segment,
         "trading_symbol": trading_symbol
     }
-# ---------- end test endpoint ----------
 
+
+# ---------- Startup / Shutdown ----------
+@app.on_event("startup")
+async def on_startup():
+    logger.info(
+        "Deepak Watchdog starting; ADMIN_TOKEN set: %s; DB enabled: %s; OPENAI set: %s",
+        bool(ADMIN_TOKEN),
+        bool(engine),
+        bool(OPENAI_API_KEY)
+    )
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    logger.info("Deepak Watchdog shutting down")
+
+
+# ---------- Local run entry ----------
+if __name__ == "__main__":
+    import uvicorn
+    logger.info("Starting uvicorn on 0.0.0.0:%s", PORT)
+    uvicorn.run("deepak_watchdog:app", host="0.0.0.0", port=PORT, log_level="info")
