@@ -417,3 +417,22 @@ if __name__ == "__main__":
     import uvicorn
     logger.info("Starting uvicorn on 0.0.0.0:%s", PORT)
     uvicorn.run("deepak_watchdog:app", host="0.0.0.0", port=PORT, log_level="info")
+    # ---------- quick test endpoint for /groww/quote ----------
+from fastapi import Query
+
+@app.get("/groww/quote")
+async def groww_quote(
+    exchange: str = Query(..., description="exchange (NSE)"),
+    segment: str = Query(..., description="segment (CASH)"),
+    trading_symbol: str = Query(..., description="trading symbol like NIFTY")
+):
+    """Test stub: echoes back received query params so we can confirm routing."""
+    return {
+        "ok": True,
+        "msg": "groww quote endpoint (test stub)",
+        "exchange": exchange,
+        "segment": segment,
+        "trading_symbol": trading_symbol
+    }
+# ---------- end test endpoint ----------
+
