@@ -2,27 +2,11 @@ services:
   - type: web
     name: deepak-watchdog
     env: docker
-    dockerfilePath: ./Dockerfile
-    plan: starter
-    instanceCount: 1
-    instanceSize: starter
+    repo: https://github.com/<your-username>/<your-repo>
+    branch: main
     autoDeploy: true
     envVars:
-      - key: GROWW_KEY
-        scope: private
-      - key: OPENAI_KEY
-        scope: private
-      - key: TELEGRAM_TOKEN
-        scope: private
-      - key: TELEGRAM_CHAT_ID
-        scope: private
-      - key: WEBHOOK_URL
-        scope: private
-      - key: POLL_INTERVAL_SECONDS
-        scope: private
-      - key: SYMBOLS
-        scope: private
-      - key: OPENAI_MODEL
-        scope: private
-      - key: MAX_LOSS_RUPEES
-        scope: private
+      - key: ADMIN_TOKEN
+        sync: false   # so you can set it in Render dashboard instead of committing secret
+      - key: PYTHONUNBUFFERED
+        value: "1"
