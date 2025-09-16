@@ -9,4 +9,5 @@ COPY . .
 
 ENV PYTHONUNBUFFERED=1
 
-CMD uvicorn main:app --host 0.0.0.0 --port $PORT --proxy-headers
+# IMPORTANT: use deepak_watchdog:app since file is deepak_watchdog.py
+CMD uvicorn deepak_watchdog:app --host 0.0.0.0 --port $PORT --proxy-headers
