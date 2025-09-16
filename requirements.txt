@@ -1,4 +1,4 @@
-requests
-flask
-apscheduler
-gunicorn
+fastapi==0.100.0
+uvicorn==0.23.2
+pydantic==1.10.12
+gunicorn==20.1.0
