@@ -9,5 +9,4 @@ COPY . .
 
 ENV PYTHONUNBUFFERED=1
 
-# Run uvicorn as ASGI server (no WSGI mismatch)
 CMD uvicorn main:app --host 0.0.0.0 --port $PORT --proxy-headers
