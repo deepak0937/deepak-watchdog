@@ -26,7 +26,7 @@ from starlette.concurrency import run_in_threadpool
 
 # SQLAlchemy for persistence (optional)
 from sqlalchemy import create_engine, Table, Column, Integer, Float, String, Text, MetaData, TIMESTAMP
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError, NoSuchModuleError
 
 # ---------- CONFIG from env ----------
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "mySuperSecretAdminToken")
@@ -73,11 +73,42 @@ runs_table = Table(
 )
 
 engine = None
+
+# Normalize and try to create engine if DATABASE_URL provided
 if DATABASE_URL:
+    # Helpful logging of the provided scheme (redacted)
     try:
-        engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+        scheme_preview = DATABASE_URL.split("://", 1)[0]
+    except Exception:
+        scheme_preview = "<unknown>"
+    logger.info("DATABASE_URL provided (scheme=%s); attempting DB init.", scheme_preview)
+
+    # Normalize common deprecated scheme 'postgres://' -> 'postgresql://'
+    # Keep the original in case we want to show helpful messages
+    normalized_db_url = DATABASE_URL
+    if normalized_db_url.startswith("postgres://"):
+        normalized_db_url = normalized_db_url.replace("postgres://", "postgresql://", 1)
+        logger.info("Normalized DATABASE_URL scheme 'postgres://' -> 'postgresql://'")
+
+    # If you want explicit psycopg2 driver you could opt for:
+    # normalized_db_url = normalized_db_url.replace("postgresql://", "postgresql+psycopg2://", 1)
+    # but require psycopg2-binary installed.
+
+    try:
+        engine = create_engine(normalized_db_url, pool_pre_ping=True)
+        # create tables if not exist
         metadata.create_all(engine)
         logger.info("DB connected; runs table ensured.")
+    except NoSuchModuleError as e:
+        # Happens when the dialect part is unknown (e.g., scheme 'postgres' or missing driver)
+        logger.exception("DB init failed: NoSuchModuleError: %s", e)
+        logger.error(
+            "SQLAlchemy couldn't load the DB dialect/driver. Two likely causes:\n"
+            "1) Your DATABASE_URL uses an unsupported scheme (e.g., 'postgres://'). Try changing it to 'postgresql://'\n"
+            "2) The DB driver (psycopg2-binary) is not installed. Add 'psycopg2-binary' to requirements.txt and redeploy.\n"
+            "Suggestion: use the Render 'Connect -> Connection string' value directly (it is usually correctly escaped)."
+        )
+        engine = None
     except Exception as e:
         logger.exception("DB init failed: %s", e)
         engine = None
