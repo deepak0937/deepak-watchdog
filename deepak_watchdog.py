@@ -439,7 +439,59 @@ async def on_startup():
         bool(OPENAI_API_KEY)
     )
 
-@app.on_event("shutdown")
+# ---------- real Groww /groww/quote endpoint ----------
+from starlette.concurrency import run_in_threadpool
+from fastapi import Query
+
+@app.get("/groww/quote")
+async def groww_quote_real(
+    exchange: str = Query(..., description="exchange (NSE)"),
+    segment: str = Query(..., description="segment (CASH)"),
+    trading_symbol: str = Query(..., description="trading symbol like NIFTY")
+):
+    """
+    Calls the grow_live_quote helper (which uses requests). We run it in a threadpool
+    so the async server doesn't block.
+    Returns JSON payload from Groww or an error object.
+    """
+    # Ensure token present
+    if not GROW_ACCESS_TOKEN:
+        return JSONResponse(status_code=400, content={"error": "GROW_ACCESS_TOKEN not configured"})
+
+    try:
+        # grow_live_quote is synchronous; run it off the event loop
+        live = await run_in_threadpool(grow_live_quote, trading_symbol, exchange, segment)
+
+        # If grow_live_quote returned an error dict, forward it
+        if isinstance(live, dict) and live.get("error"):
+            return JSONResponse(status_code=502, content={"error": "Groww fetch failed", "details": live.get("error")})
+
+        # Normalize common fields if payload exists
+        payload = live.get("payload") if isinstance(live, dict) else None
+        ltp = None
+        oi = None
+        iv = None
+        if payload and isinstance(payload, dict):
+            ltp = payload.get("last_price") or payload.get("lastPrice") or payload.get("last_trade_price") or payload.get("last_price_ltp")
+            oi = payload.get("open_interest") or payload.get("openInterest")
+            iv = payload.get("implied_volatility") or payload.get("impliedVolatility") or payload.get("iv")
+
+        return {
+            "ok": True,
+            "source": "groww",
+            "symbol": trading_symbol,
+            "exchange": exchange,
+            "segment": segment,
+            "ltp": ltp,
+            "open_interest": oi,
+            "iv": iv,
+            "raw": live
+        }
+    except Exception as e:
+        logger.exception("groww_quote_real error: %s", e)
+        return JSONResponse(status_code=500, content={"error": "internal", "details": str(e)})
+# ---------- end groww quote ----------
+
 async def on_shutdown():
     logger.info("Deepak Watchdog shutting down")
 
