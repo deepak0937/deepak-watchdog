@@ -5,6 +5,14 @@ Deepak Watchdog - final updated version
 - Safe OpenAI handling (won't crash if OPENAI_KEY missing)
 - Validate webhook URL before posting
 - Includes /run-now, /latest, /pause, /resume routes
+
+Note: This file is intended to be launched by Gunicorn:
+  gunicorn app:app --bind 0.0.0.0:$PORT
+
+If you want the background scheduler to run, set environment variable:
+  RUN_SCHEDULER=true
+in Render (or your environment). This prevents accidental multiple scheduler
+instances when Gunicorn launches multiple workers.
 """
 
 import os
@@ -317,7 +325,7 @@ def _check_admin_token(req):
     token = req.args.get("token", "")
     if not token:
         auth = req.headers.get("Authorization", "")
-        if auth.lower().startswith("bearer "):
+        if auth and auth.lower().startswith("bearer "):
             token = auth.split(" ", 1)[1].strip()
     if not ADMIN_TOKEN:
         return False, ("admin token not set on server", 403)
@@ -389,12 +397,12 @@ def start_scheduler():
     SCHED.start()
     print(f"[Deepak] Scheduler started: polling every {POLL_INTERVAL_SECONDS}s; token refresh every {refresh_hours}h")
 
-# ========== APP ENTRYPOINT ==========
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))  # Render-compatible port binding
-    print("[Deepak] Starting watchdog. Symbols:", SYMBOLS, "Polls every:", POLL_INTERVAL_SECONDS)
+# Optionally start scheduler if explicitly enabled via env var.
+# This prevents accidental scheduler start in every Gunicorn worker.
+if os.getenv("RUN_SCHEDULER", "").lower() in ("1", "true", "yes"):
     try:
         start_scheduler()
     except Exception as e:
-        print("[Deepak] Scheduler failed to start:", e)
-    app.run(host="0.0.0.0", port=port)
+        print("[Deepak] Scheduler failed to start at import time:", e)
+
+# End of file - do NOT include app.run() here when using Gunicorn.
