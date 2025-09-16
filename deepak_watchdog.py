@@ -38,14 +38,6 @@ class RunNowPayload(BaseModel):
     note: Optional[str] = None
     force: Optional[bool] = False
 
-class RunLogEntry(BaseModel):
-    timestamp: str
-    note: Optional[str]
-    force: bool
-    status: str
-    duration_seconds: float
-    error: Optional[str] = None
-
 # -----------------------------
 # State
 # -----------------------------
@@ -67,6 +59,7 @@ def _extract_token(request: Request) -> Optional[str]:
         return qp
     return None
 
+
 def do_work(note: Optional[str], force: bool):
     """Simulated background job. Replace with Deepak Forecast logic."""
     start_ts = time.time()
@@ -79,7 +72,7 @@ def do_work(note: Optional[str], force: bool):
         "duration_seconds": 0.0,
     }
     try:
-        # Simulate actual job
+        # Simulate job
         time.sleep(2)
         entry["duration_seconds"] = round(time.time() - start_ts, 2)
         logger.info("do_work DONE: %s", entry)
@@ -142,4 +135,4 @@ async def on_shutdown():
 if __name__ == "__main__":
     import uvicorn
     logger.info("Running locally with uvicorn on 0.0.0.0:%s", PORT)
-    uvicorn.run("main:app", host="0.0.0.0", port=PORT, log_level="info")
+    uvicorn.run("deepak_watchdog:app", host="0.0.0.0", port=PORT, log_level="info")
