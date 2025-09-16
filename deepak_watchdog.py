@@ -7,7 +7,7 @@ Features:
 - Local deterministic fallback forecast
 - Persist runs to Postgres (if DATABASE_URL set)
 - Optionally send Telegram / Slack notifications
-- FastAPI endpoints: /health, /status, /run-now, /shutdown
+- FastAPI endpoints: /health, /status, /run-now, /shutdown, /groww/quote
 """
 
 import os
@@ -16,12 +16,13 @@ import json
 import re
 import logging
 from typing import Any, Dict, Optional, List
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import requests
 from requests.adapters import HTTPAdapter, Retry
-from fastapi import FastAPI, Request, BackgroundTasks, HTTPException
+from fastapi import FastAPI, Request, BackgroundTasks, HTTPException, Query
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 # SQLAlchemy for persistence (optional)
 from sqlalchemy import create_engine, Table, Column, Integer, Float, String, Text, MetaData, TIMESTAMP
@@ -204,17 +205,18 @@ def grow_historical_bulk(groww_symbol: str, start_time: str, end_time: str, exch
 def compute_local_forecast(snapshot: Dict[str, Any]) -> Dict[str, Any]:
     """Small deterministic rule-based fallback. Return forecast, confidence, reason."""
     try:
-        ltp = snapshot.get("last_price") or snapshot.get("last_price_ltp") or snapshot.get("close")
+        # accept flexible snapshots
+        ltp = snapshot.get("ltp") or snapshot.get("last_price") or snapshot.get("last_price_ltp") or snapshot.get("close")
         if ltp is None:
             return {"forecast": "no-data", "confidence": 0, "reason": "missing price"}
-        oi = snapshot.get("open_interest") or 0
-        iv = snapshot.get("implied_volatility") or 0
+        oi = snapshot.get("open_interest") or snapshot.get("openInterest") or 0
+        iv = snapshot.get("iv") or snapshot.get("implied_volatility") or 0
         # simple rules
         if iv and iv > 0.40:
             return {"forecast": "volatile", "confidence": 50, "reason": f"high IV {iv}"}
         if oi and oi > 200000:
             return {"forecast": "bullish", "confidence": 60, "reason": f"high OI {oi}"}
-        # numeric parity toy rule
+        # parity toy rule
         try:
             if int(float(ltp)) % 2 == 0:
                 return {"forecast": "slightly-bullish", "confidence": 40, "reason": "ltp parity rule"}
@@ -305,7 +307,6 @@ def do_work(note: Optional[str] = None, force: bool = False, trading_symbol: str
     oi = None
     iv = None
     if payload and isinstance(payload, dict):
-        # Grow docs show fields like last_price, open_interest, implied_volatility
         ltp = payload.get("last_price") or payload.get("lastPrice") or payload.get("last_trade_price") or payload.get("last_price_ltp")
         oi = payload.get("open_interest") or payload.get("openInterest")
         iv = payload.get("implied_volatility") or payload.get("impliedVolatility") or payload.get("iv")
@@ -398,51 +399,10 @@ async def shutdown(request: Request):
     if token != ADMIN_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized")
     logger.warning("Shutdown requested by admin token")
-   # ---------- Routes ---------- (already above)
-
-@app.post("/shutdown")
-async def shutdown(request: Request):
-    token = _extract_admin_token(request)
-    if token != ADMIN_TOKEN:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    logger.warning("Shutdown requested by admin token")
     os.kill(os.getpid(), 15)
     return {"shutdown": "requested"}
 
-
-# ---------- quick test endpoint for /groww/quote ----------
-from fastapi import Query
-
-@app.get("/groww/quote")
-async def groww_quote(
-    exchange: str = Query(..., description="exchange (NSE)"),
-    segment: str = Query(..., description="segment (CASH)"),
-    trading_symbol: str = Query(..., description="trading symbol like NIFTY")
-):
-    """Test stub: echoes back received query params so we can confirm routing."""
-    return {
-        "ok": True,
-        "msg": "groww quote endpoint (test stub)",
-        "exchange": exchange,
-        "segment": segment,
-        "trading_symbol": trading_symbol
-    }
-
-
-# ---------- Startup / Shutdown ----------
-@app.on_event("startup")
-async def on_startup():
-    logger.info(
-        "Deepak Watchdog starting; ADMIN_TOKEN set: %s; DB enabled: %s; OPENAI set: %s",
-        bool(ADMIN_TOKEN),
-        bool(engine),
-        bool(OPENAI_API_KEY)
-    )
-
 # ---------- real Groww /groww/quote endpoint ----------
-from starlette.concurrency import run_in_threadpool
-from fastapi import Query
-
 @app.get("/groww/quote")
 async def groww_quote_real(
     exchange: str = Query(..., description="exchange (NSE)"),
@@ -492,12 +452,23 @@ async def groww_quote_real(
         return JSONResponse(status_code=500, content={"error": "internal", "details": str(e)})
 # ---------- end groww quote ----------
 
+# ---------- Startup / Shutdown ----------
+@app.on_event("startup")
+async def on_startup():
+    logger.info(
+        "Deepak Watchdog starting; ADMIN_TOKEN set: %s; DB enabled: %s; OPENAI set: %s",
+        bool(ADMIN_TOKEN),
+        bool(engine),
+        bool(OPENAI_API_KEY)
+    )
+
+@app.on_event("shutdown")
 async def on_shutdown():
     logger.info("Deepak Watchdog shutting down")
-
 
 # ---------- Local run entry ----------
 if __name__ == "__main__":
     import uvicorn
     logger.info("Starting uvicorn on 0.0.0.0:%s", PORT)
     uvicorn.run("deepak_watchdog:app", host="0.0.0.0", port=PORT, log_level="info")
+
