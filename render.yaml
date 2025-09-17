@@ -1,0 +1,14 @@
+cron_jobs:
+  - name: deepak-trend-cron
+    schedule: "45 9 * * 1-6"   # 09:45 UTC = 15:15 IST Mon-Sat
+    command: "python3 chat_integration.py"
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    envVars:
+      - key: DATABASE_URL
+        sync: true
+      - key: OPENAI_API_KEY
+        sync: true
+      - key: GROWW_TOKEN
+        sync: true
