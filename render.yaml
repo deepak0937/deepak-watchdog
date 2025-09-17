@@ -1,3 +1,6 @@
+cron_jobs:
+  - name: deepak-trend-cron
+  ...
 jobs:
   - name: deepak-trend-cron
     type: cron
@@ -13,3 +16,4 @@ jobs:
         sync: true
       - key: GROWW_TOKEN
         sync: true
+        
