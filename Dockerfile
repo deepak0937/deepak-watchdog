@@ -1,4 +1,5 @@
 # Dockerfile - for Render / Production
+# Pin Python to a specific patch release to match CI & avoid ABI mismatch
 FROM python:3.11.12-slim
 
 # Prevent python from writing .pyc files and buffering stdout/stderr
@@ -30,9 +31,3 @@ EXPOSE 10000
 # This assumes your app instance is named `app` inside deepak_watchdog.py
 # (FastAPI recommended: use the Uvicorn worker).
 CMD ["/bin/sh", "-lc", "gunicorn deepak_watchdog:app --bind 0.0.0.0:$PORT -k uvicorn.workers.UvicornWorker --workers 3 --timeout 120"]
-
-# If you are using plain Flask (no FastAPI), you may prefer:
-# CMD ["/bin/sh", "-lc", "gunicorn deepak_watchdog:app --bind 0.0.0.0:$PORT --workers 3 --timeout 120"]
-
-# If your app variable is named `application` instead of `app`, replace `deepak_watchdog:app`
-# with `deepak_watchdog:application` in the CMD above.
