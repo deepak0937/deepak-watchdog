@@ -8,8 +8,9 @@ import httpx
 from pydantic import BaseModel, Field, validator
 
 # ---------- Config ----------
+# Prefer GROW_ACCESS_TOKEN (matches deepak_watchdog.py) but fall back to older var for compatibility
 GROWW_BASE = os.getenv("GROWW_BASE_URL", "https://api.groww.in")
-GROWW_TOKEN = os.getenv("GROWW_API_TOKEN", "")  # must match Render env var
+GROWW_TOKEN = os.getenv("GROW_ACCESS_TOKEN") or os.getenv("GROWW_API_TOKEN", "")
 REQUEST_TIMEOUT = float(os.getenv("GROWW_REQUEST_TIMEOUT", "10"))
 MAX_RETRIES = int(os.getenv("GROWW_MAX_RETRIES", "3"))
 RETRY_BACKOFF = float(os.getenv("GROWW_RETRY_BACKOFF", "0.8"))
@@ -78,8 +79,11 @@ class OptionChainResponse(BaseModel):
 # ---------- HTTP helper with retries ----------
 async def _get_with_retries(url: str, params: Dict[str, Any] = None, headers: Dict[str, str] = None) -> httpx.Response:
     headers = headers or {}
+    # Add Bearer token header if token available
     if GROWW_TOKEN:
         headers.setdefault("Authorization", f"Bearer {GROWW_TOKEN}")
+        # some APIs use X-API-KEY or x-api-key — include as fallback
+        headers.setdefault("X-API-KEY", GROWW_TOKEN)
     attempt = 0
     backoff = RETRY_BACKOFF
     last_exc = None
@@ -91,12 +95,14 @@ async def _get_with_retries(url: str, params: Dict[str, Any] = None, headers: Di
                 return resp
             except httpx.HTTPStatusError as e:
                 status = e.response.status_code
+                # retry on rate limiting
                 if status == 429:
                     await asyncio.sleep(backoff * (attempt + 1))
                     attempt += 1
                     backoff *= 2
                     last_exc = e
                     continue
+                # For 401/403 we don't retry here - bubble up
                 raise
             except (httpx.RequestError, httpx.TimeoutException) as e:
                 last_exc = e
@@ -138,26 +144,6 @@ async def fetch_option_chain(symbol: str, expiry: Optional[str] = None) -> Optio
                 last_exc = Exception(f"API error at {url}: {data.get('error') or data.get('status')}")
                 continue
 
-            # Normalize fields
-            normalized = {
-                "symbol": data.get("symbol") or data.get("meta", {}).get("symbol") or symbol,
-                "timestamp": data.get("timestamp") or data.get("ts") or data.get("meta", {}).get("timestamp") or datetime.utcnow().isoformat(),
-                "underlying": data.get("underlying") or data.get("underlyingValue") or data.get("underlying_value") or data.get("meta", {}).get("underlying") or 0.0,
-                "ce": data.get("ce", []) or data.get("call", []) or data.get("calls", []) or (data.get("payload") or {}).get("ce", []) or [],
-                "pe": data.get("pe", []) or data.get("put", []) or data.get("puts", []) or (data.get("payload") or {}).get("pe", []) or [],
-            }
+            # Normalize fie
 
-            parsed = OptionChainResponse(**normalized)
-            return parsed
-
-        except Exception as e:
-            last_exc = e
-            continue
-
-    # nothing worked — re-raise last error (so route returns 500 and logs show cause)
-    if last_exc:
-        raise last_exc
-
-    # fallback (shouldn't reach here)
-    return OptionChainResponse(symbol=symbol, timestamp=datetime.utcnow().isoformat(), underlying=0.0, ce=[], pe=[])
 
