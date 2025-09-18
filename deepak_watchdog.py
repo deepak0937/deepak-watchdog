@@ -28,6 +28,9 @@ from starlette.concurrency import run_in_threadpool
 from sqlalchemy import create_engine, Table, Column, Integer, Float, String, Text, MetaData, TIMESTAMP
 from sqlalchemy.exc import SQLAlchemyError, NoSuchModuleError
 
+# --- NEW: include Groww API router ---
+from app.api.groww_routes import router as groww_router
+
 # ---------- CONFIG from env ----------
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "mySuperSecretAdminToken")
 PORT = int(os.environ.get("PORT", "10000"))
@@ -48,6 +51,9 @@ logger = logging.getLogger("deepak-watchdog")
 
 # ---------- FastAPI ----------
 app = FastAPI(title="Deepak Watchdog - Groww + ChatGPT")
+
+# --- NEW: register the groww router so /api/groww/* endpoints are available ---
+app.include_router(groww_router)
 
 # ---------- In-memory cache for quick status ----------
 RUN_LOG: List[Dict[str, Any]] = []  # last runs (kept in-memory for /status)
@@ -502,4 +508,5 @@ if __name__ == "__main__":
     import uvicorn
     logger.info("Starting uvicorn on 0.0.0.0:%s", PORT)
     uvicorn.run("deepak_watchdog:app", host="0.0.0.0", port=PORT, log_level="info")
+
 
