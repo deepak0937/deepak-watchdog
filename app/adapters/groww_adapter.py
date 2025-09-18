@@ -7,14 +7,16 @@ from datetime import datetime, timezone, timedelta
 import httpx
 from pydantic import BaseModel, Field, validator
 
+# ---------- Config ----------
 GROWW_BASE = os.getenv("GROWW_BASE_URL", "https://api.groww.in")
-GROWW_TOKEN = os.getenv("GROWW_API_TOKEN", "")
+GROWW_TOKEN = os.getenv("GROWW_API_TOKEN", "")  # must match Render env var
 REQUEST_TIMEOUT = float(os.getenv("GROWW_REQUEST_TIMEOUT", "10"))
 MAX_RETRIES = int(os.getenv("GROWW_MAX_RETRIES", "3"))
 RETRY_BACKOFF = float(os.getenv("GROWW_RETRY_BACKOFF", "0.8"))
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
+# ---------- Models ----------
 class OptionLeg(BaseModel):
     strike: float
     expiry: datetime
@@ -73,7 +75,7 @@ class OptionChainResponse(BaseModel):
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(IST)
 
-
+# ---------- HTTP helper with retries ----------
 async def _get_with_retries(url: str, params: Dict[str, Any] = None, headers: Dict[str, str] = None) -> httpx.Response:
     headers = headers or {}
     if GROWW_TOKEN:
@@ -103,22 +105,59 @@ async def _get_with_retries(url: str, params: Dict[str, Any] = None, headers: Di
                 backoff *= 2
         raise last_exc
 
-
+# ---------- Option Chain fetcher ----------
 async def fetch_option_chain(symbol: str, expiry: Optional[str] = None) -> OptionChainResponse:
-    endpoint = f"{GROWW_BASE}/option-chain/{symbol}"
+    """
+    Try several plausible Groww endpoint paths and return the first successful parsed response.
+    """
+    candidate_paths = [
+        f"{GROWW_BASE}/v1/option-chain/{symbol}",
+        f"{GROWW_BASE}/v1/option-chain",
+        f"{GROWW_BASE}/option-chain/{symbol}",
+        f"{GROWW_BASE}/option-chain",
+        f"{GROWW_BASE}/v1/market-data/option-chain/{symbol}",
+        f"{GROWW_BASE}/v1/marketdata/option-chain/{symbol}",
+        f"{GROWW_BASE}/v2/option-chain/{symbol}",
+    ]
+
     params = {}
     if expiry:
         params["expiry"] = expiry
 
-    resp = await _get_with_retries(endpoint, params=params)
-    data = resp.json()
+    last_exc = None
+    for url in candidate_paths:
+        try:
+            resp = await _get_with_retries(url, params=params)
+            data = resp.json()
 
-    normalized = {
-        "symbol": data.get("symbol") or symbol,
-        "timestamp": data.get("timestamp") or data.get("ts") or datetime.utcnow().isoformat(),
-        "underlying": data.get("underlying") or data.get("underlyingValue") or 0.0,
-        "ce": data.get("ce", []) or data.get("call", []) or [],
-        "pe": data.get("pe", []) or data.get("put", []) or [],
-    }
-    parsed = OptionChainResponse(**normalized)
-    return parsed
+            # heuristic: skip non-dict or obvious error payloads
+            if not isinstance(data, dict):
+                last_exc = Exception(f"Non-object JSON from {url}")
+                continue
+            if data.get("error") or (data.get("status") and str(data.get("status")).lower() not in ("ok", "success")):
+                last_exc = Exception(f"API error at {url}: {data.get('error') or data.get('status')}")
+                continue
+
+            # Normalize fields
+            normalized = {
+                "symbol": data.get("symbol") or data.get("meta", {}).get("symbol") or symbol,
+                "timestamp": data.get("timestamp") or data.get("ts") or data.get("meta", {}).get("timestamp") or datetime.utcnow().isoformat(),
+                "underlying": data.get("underlying") or data.get("underlyingValue") or data.get("underlying_value") or data.get("meta", {}).get("underlying") or 0.0,
+                "ce": data.get("ce", []) or data.get("call", []) or data.get("calls", []) or (data.get("payload") or {}).get("ce", []) or [],
+                "pe": data.get("pe", []) or data.get("put", []) or data.get("puts", []) or (data.get("payload") or {}).get("pe", []) or [],
+            }
+
+            parsed = OptionChainResponse(**normalized)
+            return parsed
+
+        except Exception as e:
+            last_exc = e
+            continue
+
+    # nothing worked — re-raise last error (so route returns 500 and logs show cause)
+    if last_exc:
+        raise last_exc
+
+    # fallback (shouldn't reach here)
+    return OptionChainResponse(symbol=symbol, timestamp=datetime.utcnow().isoformat(), underlying=0.0, ce=[], pe=[])
+
