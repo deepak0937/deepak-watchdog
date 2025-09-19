@@ -191,6 +191,44 @@ def clear_active_trade(x_admin_token: str = Header(None)):
     r.delete(ACTIVE_TRADE_KEY)
     logger.info("active trade cleared by admin")
     return {"status": "cleared"}
+    # -------- zerodha snapshot endpoint --------
+@app.get("/zerodha/snapshot")
+def zerodha_snapshot(x_admin_token: str = Header(None)):
+    """
+    Returns live Zerodha data (LTP + Option Chain if available).
+    Use: curl -X GET https://deepak-watchdog.onrender.com/zerodha/snapshot -H "x-admin-token: YOUR_TOKEN"
+    """
+    check_admin(x_admin_token)
+    try:
+        # 🔹 LTP of NIFTY (modify to BankNIFTY if you want)
+        ltp = zerodha.get_ltp("NSE:NIFTY50")
+
+        # 🔹 Option Chain (requires your zerodha.py to have get_option_chain)
+        option_chain = {}
+        try:
+            option_chain = zerodha.get_option_chain("NIFTY")
+        except Exception as oc_err:
+            logger.warning("option chain not available: %s", oc_err)
+
+        # 🔹 Active positions (for P&L monitoring later)
+        positions = {}
+        try:
+            positions = zerodha.get_positions()
+        except Exception as pos_err:
+            logger.warning("positions fetch failed: %s", pos_err)
+
+        return {
+            "status": "ok",
+            "ltp": ltp,
+            "option_chain": option_chain,
+            "positions": positions,
+            "ts": time.time()
+        }
+
+    except Exception as e:
+        logger.exception("snapshot error")
+        return {"status": "error", "detail": str(e)}
+
 
 
 
