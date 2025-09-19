@@ -90,7 +90,10 @@ def trade(payload: dict, x_admin_token: str = Header(None)):
         return {"status": "blocked", "reason": "single active trade exists"}
     resp = place_trade_internal(payload, simulate=False)
     if resp.get("status") == "placed":
-        r.set(ACTIVE_TRADE_KEY, json.dumps({"placed_resp": resp["resp"], "ts": time.time()}))
+        r.set(
+            ACTIVE_TRADE_KEY,
+            json.dumps({"placed_resp": resp["resp"], "ts": time.time()})
+        )
         logger.info("active trade recorded in redis")
     return resp
 
@@ -135,4 +138,24 @@ def place_trade_internal(payload: dict, simulate: bool = False) -> dict:
             product=payload.get("product", "MIS"),
             simulate=simulate
         )
-    except Exception a
+    except Exception as e:
+        logger.exception("order placement failed")
+        return {"status": "failed", "reason": str(e)}
+
+    if simulate:
+        return {"status": "simulated", "resp": order_resp, "worst_loss": worst_loss}
+    return {"status": "placed", "resp": order_resp, "worst_loss": worst_loss}
+
+# -------- debug / admin helpers --------
+@app.get("/admin/active_trade")
+def get_active_trade(x_admin_token: str = Header(None)):
+    check_admin(x_admin_token)
+    val = r.get(ACTIVE_TRADE_KEY)
+    return {"active_trade": json.loads(val) if val else None}
+
+@app.post("/admin/clear_active_trade")
+def clear_active_trade(x_admin_token: str = Header(None)):
+    check_admin(x_admin_token)
+    r.delete(ACTIVE_TRADE_KEY)
+    logger.info("active trade cleared by admin")
+    return {"status": "cleared"}
