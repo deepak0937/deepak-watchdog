@@ -73,8 +73,8 @@ def predict(x_admin_token: str = Header(None)):
         import re
         cleaned = raw_pred
         if isinstance(raw_pred, str):
-            # strip ```json ... ``` code fences
-            cleaned = re.sub(r"^```(?:json)?\s*|```$", "", raw_pred.strip(), flags=re.I | re.M)
+            # remove all code fences (```json ... ```)
+            cleaned = re.sub(r"```(?:json)?", "", raw_pred, flags=re.I).replace("```", "").strip()
 
             try:
                 pred = json.loads(cleaned)
@@ -184,4 +184,5 @@ def clear_active_trade(x_admin_token: str = Header(None)):
     r.delete(ACTIVE_TRADE_KEY)
     logger.info("active trade cleared by admin")
     return {"status": "cleared"}
+
 
