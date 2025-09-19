@@ -2,8 +2,8 @@
 import os
 import json
 import time
-import logging
 import re
+import logging
 from fastapi import FastAPI, Request, Header, HTTPException
 import redis
 from services import zerodha
@@ -67,39 +67,57 @@ def cb_zerodha(request: Request):
 @app.post("/predict")
 def predict(x_admin_token: str = Header(None)):
     check_admin(x_admin_token)
+    raw_pred = None
     try:
         raw_pred = get_prediction()
 
         # --- Clean up model output into valid JSON ---
-        cleaned = raw_pred
+        pred = None
         if isinstance(raw_pred, str):
-            # remove code fences (```json ... ```)
-            cleaned = re.sub(r"```(?:json)?", "", raw_pred, flags=re.I).replace("```", "").strip()
+            # Aggressively remove markdown code fences and language tags
+            cleaned = re.sub(r"```(?:\s*json\s*)?", "", raw_pred, flags=re.I)
+            cleaned = cleaned.replace("```", "").strip()
 
+            # Try direct JSON parse
             try:
                 pred = json.loads(cleaned)
             except Exception:
-                # fallback: attempt to extract JSON between first { ... last }
+                # Fallback: extract first { ... } substring and parse
                 if "{" in cleaned and "}" in cleaned:
-                    start = cleaned.index("{")
-                    end = cleaned.rindex("}") + 1
-                    candidate = cleaned[start:end]
-                    pred = json.loads(candidate)
+                    try:
+                        start = cleaned.index("{")
+                        end = cleaned.rindex("}") + 1
+                        candidate = cleaned[start:end]
+                        pred = json.loads(candidate)
+                    except Exception:
+                        pred = None
                 else:
-                    raise
+                    pred = None
         else:
+            # get_prediction already returned structured data
             pred = raw_pred
+
+        # If parsing completely failed, return raw text inside a dict (so clients always get JSON)
+        if pred is None:
+            pred = {"error": "unparseable", "raw": raw_pred if raw_pred is not None else ""}
 
         # log + save to Redis
         log = {"ts": time.time(), "prediction": pred}
-        r.lpush(PREDICTIONS_LIST, json.dumps(log))
-        logger.info("prediction stored")
+        try:
+            r.lpush(PREDICTIONS_LIST, json.dumps(log))
+            logger.info("prediction stored")
+        except Exception:
+            logger.exception("failed to push prediction to redis")
 
         return {"status": "ok", "source": "openai", "data": pred}
 
     except Exception as e:
         logger.exception("prediction error")
-        return {"error": "invalid_json", "raw": str(raw_pred), "detail": str(e)}
+        # If anything unexpected happened, return a safe JSON with raw content if available
+        fallback = {"error": "prediction_exception", "detail": str(e)}
+        if raw_pred is not None:
+            fallback["raw"] = raw_pred
+        return {"status": "ok", "source": "openai", "data": fallback}
 
 # -------- trade simulation & placement --------
 @app.post("/simulate_trade")
