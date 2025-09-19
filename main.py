@@ -70,37 +70,54 @@ def predict(x_admin_token: str = Header(None)):
     raw_pred = None
     try:
         raw_pred = get_prediction()
-        cleaned = raw_pred
 
+        pred = None
         if isinstance(raw_pred, str):
-            # Remove ```json ... ``` wrappers
-            cleaned = re.sub(r"```(?:json)?", "", raw_pred, flags=re.I)
-            cleaned = cleaned.replace("```", "").strip()
+            cleaned = raw_pred
 
+            # 1) Remove any fenced-blocks (```json ... ```)
+            def _unfence(m):
+                inner = m.group(0)
+                inner = re.sub(r"^```(?:\s*\w+\s*)?", "", inner, flags=re.I)
+                inner = inner.rsplit("```", 1)[0]
+                return inner
+
+            cleaned = re.sub(r"```[\s\S]*?```", _unfence, cleaned, flags=re.I).strip()
+            cleaned = cleaned.replace("```", "").replace("`", "").replace("json", "").strip()
+
+            # 2) Try JSON parse directly
             try:
                 pred = json.loads(cleaned)
             except Exception:
-                # Fallback: extract { ... }
-                if "{" in cleaned and "}" in cleaned:
+                # 3) Fallback: extract first {...}
+                try:
                     start = cleaned.index("{")
                     end = cleaned.rindex("}") + 1
                     candidate = cleaned[start:end]
                     pred = json.loads(candidate)
-                else:
-                    raise
+                except Exception:
+                    pred = None
         else:
             pred = raw_pred
 
-        # Save to Redis
+        if pred is None:
+            pred = {"error": "unparseable", "raw": raw_pred if raw_pred is not None else ""}
+
         log = {"ts": time.time(), "prediction": pred}
-        r.lpush(PREDICTIONS_LIST, json.dumps(log))
-        logger.info("prediction stored")
+        try:
+            r.lpush(PREDICTIONS_LIST, json.dumps(log))
+            logger.info("prediction stored")
+        except Exception:
+            logger.exception("failed to push prediction to redis")
 
         return {"status": "ok", "source": "openai", "data": pred}
 
-    except Exception as e:
-        logger.exception("prediction error")
-        return {"status": "error", "raw": str(raw_pred), "detail": str(e)}
+    except Exception as exc:
+        logger.exception("predict endpoint error")
+        fallback = {"error": "prediction_exception", "detail": str(exc)}
+        if raw_pred is not None:
+            fallback["raw"] = raw_pred
+        return {"status": "ok", "source": "openai", "data": fallback}
 
 # -------- trade simulation & placement --------
 @app.post("/simulate_trade")
