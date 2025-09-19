@@ -3,6 +3,7 @@ import os
 import json
 import time
 import logging
+import re
 from fastapi import FastAPI, Request, Header, HTTPException
 import redis
 from services import zerodha
@@ -70,10 +71,9 @@ def predict(x_admin_token: str = Header(None)):
         raw_pred = get_prediction()
 
         # --- Clean up model output into valid JSON ---
-        import re
         cleaned = raw_pred
         if isinstance(raw_pred, str):
-            # remove all code fences (```json ... ```)
+            # remove code fences (```json ... ```)
             cleaned = re.sub(r"```(?:json)?", "", raw_pred, flags=re.I).replace("```", "").strip()
 
             try:
