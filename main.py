@@ -4,7 +4,7 @@ import json
 import time
 import re
 import logging
-from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi import FastAPI, Request, Header, HTTPException, Query
 import redis
 from services import zerodha
 from predictor.predictor import get_prediction
@@ -24,16 +24,19 @@ MAX_ALLOWED_LOSS = int(os.environ.get("MAX_ALLOWED_LOSS", "11000"))  # rupees
 ACTIVE_TRADE_KEY = "ACTIVE_TRADE"
 PREDICTIONS_LIST = "PREDICTIONS"
 
+
 # -------- helpers --------
 def check_admin(token: str):
     if token != ADMIN_TOKEN:
         logger.warning("unauthorized admin token attempt")
         raise HTTPException(status_code=401, detail="unauthorized")
 
+
 # -------- health --------
 @app.get("/health")
 def health():
     return {"status": "ok", "time": time.time()}
+
 
 # -------- zerodha auth endpoints --------
 @app.get("/login/zerodha")
@@ -44,6 +47,7 @@ def login_zerodha():
     except Exception as e:
         logger.exception("failed to generate login url")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/callback/zerodha")
 def cb_zerodha(request: Request):
@@ -62,6 +66,7 @@ def cb_zerodha(request: Request):
     except Exception as e:
         logger.exception("failed to generate session from request_token")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # -------- prediction endpoint --------
 @app.post("/predict")
@@ -119,11 +124,13 @@ def predict(x_admin_token: str = Header(None)):
             fallback["raw"] = raw_pred
         return {"status": "ok", "source": "openai", "data": fallback}
 
+
 # -------- trade simulation & placement --------
 @app.post("/simulate_trade")
 def simulate_trade(payload: dict, x_admin_token: str = Header(None)):
     check_admin(x_admin_token)
     return place_trade_internal(payload, simulate=True)
+
 
 @app.post("/trade")
 def trade(payload: dict, x_admin_token: str = Header(None)):
@@ -139,6 +146,7 @@ def trade(payload: dict, x_admin_token: str = Header(None)):
         )
         logger.info("active trade recorded in redis")
     return resp
+
 
 def place_trade_internal(payload: dict, simulate: bool = False) -> dict:
     required = ("exchange", "tradingsymbol", "qty", "transaction_type", "entry", "stoploss")
@@ -178,6 +186,7 @@ def place_trade_internal(payload: dict, simulate: bool = False) -> dict:
         return {"status": "simulated", "resp": order_resp, "worst_loss": worst_loss}
     return {"status": "placed", "resp": order_resp, "worst_loss": worst_loss}
 
+
 # -------- debug / admin helpers --------
 @app.get("/admin/active_trade")
 def get_active_trade(x_admin_token: str = Header(None)):
@@ -185,32 +194,39 @@ def get_active_trade(x_admin_token: str = Header(None)):
     val = r.get(ACTIVE_TRADE_KEY)
     return {"active_trade": json.loads(val) if val else None}
 
+
 @app.post("/admin/clear_active_trade")
 def clear_active_trade(x_admin_token: str = Header(None)):
     check_admin(x_admin_token)
     r.delete(ACTIVE_TRADE_KEY)
     logger.info("active trade cleared by admin")
     return {"status": "cleared"}
-    # -------- zerodha snapshot endpoint --------
+
+
+# -------- zerodha snapshot endpoint --------
 @app.get("/zerodha/snapshot")
-def zerodha_snapshot(x_admin_token: str = Header(None)):
+def zerodha_snapshot(
+    x_admin_token: str = Header(None),
+    symbol: str = Query("NIFTY50", description="Tradingsymbol (e.g., NIFTY50, BANKNIFTY)")
+):
     """
     Returns live Zerodha data (LTP + Option Chain if available).
-    Use: curl -X GET https://deepak-watchdog.onrender.com/zerodha/snapshot -H "x-admin-token: YOUR_TOKEN"
+    Example:
+    curl -X GET "https://deepak-watchdog.onrender.com/zerodha/snapshot?symbol=NIFTY50" -H "x-admin-token: TOKEN"
     """
     check_admin(x_admin_token)
     try:
-        # 🔹 LTP of NIFTY (modify to BankNIFTY if you want)
-        ltp = zerodha.get_ltp("NSE:NIFTY50")
+        # 🔹 LTP
+        ltp = zerodha.get_ltp("NSE", symbol)
 
-        # 🔹 Option Chain (requires your zerodha.py to have get_option_chain)
+        # 🔹 Option Chain
         option_chain = {}
         try:
-            option_chain = zerodha.get_option_chain("NIFTY")
+            option_chain = zerodha.get_option_chain(symbol)
         except Exception as oc_err:
             logger.warning("option chain not available: %s", oc_err)
 
-        # 🔹 Active positions (for P&L monitoring later)
+        # 🔹 Positions
         positions = {}
         try:
             positions = zerodha.get_positions()
@@ -219,6 +235,7 @@ def zerodha_snapshot(x_admin_token: str = Header(None)):
 
         return {
             "status": "ok",
+            "symbol": symbol,
             "ltp": ltp,
             "option_chain": option_chain,
             "positions": positions,
@@ -228,7 +245,3 @@ def zerodha_snapshot(x_admin_token: str = Header(None)):
     except Exception as e:
         logger.exception("snapshot error")
         return {"status": "error", "detail": str(e)}
-
-
-
-
