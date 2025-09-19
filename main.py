@@ -70,54 +70,37 @@ def predict(x_admin_token: str = Header(None)):
     raw_pred = None
     try:
         raw_pred = get_prediction()
+        cleaned = raw_pred
 
-        # --- Clean up model output into valid JSON ---
-        pred = None
         if isinstance(raw_pred, str):
-            # Aggressively remove markdown code fences and language tags
-            cleaned = re.sub(r"```(?:\s*json\s*)?", "", raw_pred, flags=re.I)
+            # Remove ```json ... ``` wrappers
+            cleaned = re.sub(r"```(?:json)?", "", raw_pred, flags=re.I)
             cleaned = cleaned.replace("```", "").strip()
 
-            # Try direct JSON parse
             try:
                 pred = json.loads(cleaned)
             except Exception:
-                # Fallback: extract first { ... } substring and parse
+                # Fallback: extract { ... }
                 if "{" in cleaned and "}" in cleaned:
-                    try:
-                        start = cleaned.index("{")
-                        end = cleaned.rindex("}") + 1
-                        candidate = cleaned[start:end]
-                        pred = json.loads(candidate)
-                    except Exception:
-                        pred = None
+                    start = cleaned.index("{")
+                    end = cleaned.rindex("}") + 1
+                    candidate = cleaned[start:end]
+                    pred = json.loads(candidate)
                 else:
-                    pred = None
+                    raise
         else:
-            # get_prediction already returned structured data
             pred = raw_pred
 
-        # If parsing completely failed, return raw text inside a dict (so clients always get JSON)
-        if pred is None:
-            pred = {"error": "unparseable", "raw": raw_pred if raw_pred is not None else ""}
-
-        # log + save to Redis
+        # Save to Redis
         log = {"ts": time.time(), "prediction": pred}
-        try:
-            r.lpush(PREDICTIONS_LIST, json.dumps(log))
-            logger.info("prediction stored")
-        except Exception:
-            logger.exception("failed to push prediction to redis")
+        r.lpush(PREDICTIONS_LIST, json.dumps(log))
+        logger.info("prediction stored")
 
         return {"status": "ok", "source": "openai", "data": pred}
 
     except Exception as e:
         logger.exception("prediction error")
-        # If anything unexpected happened, return a safe JSON with raw content if available
-        fallback = {"error": "prediction_exception", "detail": str(e)}
-        if raw_pred is not None:
-            fallback["raw"] = raw_pred
-        return {"status": "ok", "source": "openai", "data": fallback}
+        return {"status": "error", "raw": str(raw_pred), "detail": str(e)}
 
 # -------- trade simulation & placement --------
 @app.post("/simulate_trade")
@@ -141,17 +124,6 @@ def trade(payload: dict, x_admin_token: str = Header(None)):
     return resp
 
 def place_trade_internal(payload: dict, simulate: bool = False) -> dict:
-    """
-    Expected payload fields:
-      - exchange (e.g., "NSE" or "NFO")
-      - tradingsymbol (string)
-      - qty (int)           # number of lots or qty depending on instrument
-      - transaction_type ("BUY"/"SELL")
-      - entry (float)
-      - stoploss (float)
-      - lot_size (int)      # important for index/options; default 1
-      - product (str)       # optional, e.g., "MIS"
-    """
     required = ("exchange", "tradingsymbol", "qty", "transaction_type", "entry", "stoploss")
     for k in required:
         if k not in payload:
@@ -202,5 +174,6 @@ def clear_active_trade(x_admin_token: str = Header(None)):
     r.delete(ACTIVE_TRADE_KEY)
     logger.info("active trade cleared by admin")
     return {"status": "cleared"}
+
 
 
