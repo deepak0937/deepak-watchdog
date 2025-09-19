@@ -67,14 +67,39 @@ def cb_zerodha(request: Request):
 def predict(x_admin_token: str = Header(None)):
     check_admin(x_admin_token)
     try:
-        pred = get_prediction()
+        raw_pred = get_prediction()
+
+        # --- Clean up model output into valid JSON ---
+        import re
+        cleaned = raw_pred
+        if isinstance(raw_pred, str):
+            # strip ```json ... ``` code fences
+            cleaned = re.sub(r"^```(?:json)?\s*|```$", "", raw_pred.strip(), flags=re.I | re.M)
+
+            try:
+                pred = json.loads(cleaned)
+            except Exception:
+                # fallback: attempt to extract JSON between first { ... last }
+                if "{" in cleaned and "}" in cleaned:
+                    start = cleaned.index("{")
+                    end = cleaned.rindex("}") + 1
+                    candidate = cleaned[start:end]
+                    pred = json.loads(candidate)
+                else:
+                    raise
+        else:
+            pred = raw_pred
+
+        # log + save to Redis
         log = {"ts": time.time(), "prediction": pred}
         r.lpush(PREDICTIONS_LIST, json.dumps(log))
         logger.info("prediction stored")
-        return pred
+
+        return {"status": "ok", "source": "openai", "data": pred}
+
     except Exception as e:
         logger.exception("prediction error")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"error": "invalid_json", "raw": str(raw_pred), "detail": str(e)}
 
 # -------- trade simulation & placement --------
 @app.post("/simulate_trade")
@@ -159,3 +184,4 @@ def clear_active_trade(x_admin_token: str = Header(None)):
     r.delete(ACTIVE_TRADE_KEY)
     logger.info("active trade cleared by admin")
     return {"status": "cleared"}
+
