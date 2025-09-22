@@ -245,3 +245,46 @@ def zerodha_snapshot(
     except Exception as e:
         logger.exception("snapshot error")
         return {"status": "error", "detail": str(e)}
+        # -------- deepak trend+ endpoint --------
+@app.get("/deepak-trend")
+def deepak_trend(x_admin_token: str = Header(None)):
+    """
+    Deepak Trend+ analysis input endpoint.
+    Pulls NIFTY spot, India VIX, option OI (ATM CE/PE), and returns snapshot.
+    """
+    check_admin(x_admin_token)
+
+    try:
+        # Spot & Futures
+        spot = zerodha.get_ltp("NSE", "NIFTY 50")
+
+        # India VIX
+        vix = zerodha.get_ltp("NSE", "INDIAVIX")
+
+        # 🔹 Auto-detect ATM strike (round to nearest 50)
+        spot_val = float(spot.get("last_price", 0))
+        atm_strike = int(round(spot_val / 50) * 50)
+
+        ce_symbol = f"NIFTY{atm_strike}CE"
+        pe_symbol = f"NIFTY{atm_strike}PE"
+
+        option_chain = {}
+        try:
+            ce_data = zerodha.get_ltp("NFO", ce_symbol)
+            pe_data = zerodha.get_ltp("NFO", pe_symbol)
+            option_chain = {ce_symbol: ce_data, pe_symbol: pe_data}
+        except Exception as oc_err:
+            logger.warning("ATM option fetch failed: %s", oc_err)
+
+        return {
+            "status": "ok",
+            "spot": spot,
+            "vix": vix,
+            "atm_strike": atm_strike,
+            "option_chain": option_chain,
+            "ts": time.time()
+        }
+
+    except Exception as e:
+        logger.exception("deepak trend+ error")
+        return {"status": "error", "detail": str(e)}
