@@ -288,3 +288,182 @@ def deepak_trend(x_admin_token: str = Header(None)):
     except Exception as e:
         logger.exception("deepak trend+ error")
         return {"status": "error", "detail": str(e)}
+        # app/services/zerodha.py
+import os
+import logging
+from kiteconnect import KiteConnect
+from dotenv import load_dotenv
+import redis
+import time
+from typing import Optional, Dict, Any, List
+
+load_dotenv()
+logger = logging.getLogger("deepak_watchdog.zerodha")
+
+KITE_API_KEY = os.getenv("KITE_API_KEY")
+KITE_API_SECRET = os.getenv("KITE_API_SECRET")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+r = redis.from_url(REDIS_URL, decode_responses=True)
+
+# Redis key names (used by main.py as well)
+REDIS_ACCESS_KEY = "ZERODHA_ACCESS_TOKEN"  # note: main.py uses this exact name
+
+def _kite_client(access_token: Optional[str] = None) -> KiteConnect:
+    """Return a KiteConnect instance. If access_token provided, set it."""
+    if not KITE_API_KEY:
+        raise RuntimeError("KITE_API_KEY not configured")
+    kc = KiteConnect(api_key=KITE_API_KEY)
+    if access_token:
+        kc.set_access_token(access_token)
+    else:
+        # if no access token provided, try redis
+        token = r.get(REDIS_ACCESS_KEY)
+        if token:
+            kc.set_access_token(token)
+    return kc
+
+# -------- auth helpers --------
+def get_login_url() -> str:
+    """
+    Returns the Zerodha login URL that the user must open to login and obtain request_token.
+    Make sure your app's redirect URL in Kite developer console matches /callback/zerodha.
+    """
+    if not KITE_API_KEY:
+        raise RuntimeError("KITE_API_KEY missing")
+    kc = KiteConnect(api_key=KITE_API_KEY)
+    return kc.login_url()
+
+def generate_session(request_token: str) -> dict:
+    """
+    Exchange request_token (from redirect/callback) for access_token.
+    Returns the kite session dict including access_token.
+    """
+    if not request_token:
+        raise ValueError("request_token required")
+    kc = KiteConnect(api_key=KITE_API_KEY)
+    data = kc.generate_session(request_token, api_secret=KITE_API_SECRET)
+    # Save to redis for later use
+    access_token = data.get("access_token")
+    if access_token:
+        r.set(REDIS_ACCESS_KEY, access_token)
+        # optional: save timestamp
+        r.set(f"{REDIS_ACCESS_KEY}:ts", int(time.time()))
+    return data
+
+def set_access_token(access_token: str) -> None:
+    """Explicitly set the access_token in redis (used by main.py)."""
+    if not access_token:
+        raise ValueError("access_token required")
+    r.set(REDIS_ACCESS_KEY, access_token)
+    r.set(f"{REDIS_ACCESS_KEY}:ts", int(time.time()))
+
+# -------- market data helpers --------
+def get_ltp(exchange: str, symbol: str) -> Dict[str, Any]:
+    """
+    Return LTP for a given exchange and symbol.
+    Example: get_ltp("NSE", "RELIANCE") or get_ltp("NSE", "NIFTY 50")
+    Note: some indices have slightly different naming on Kite; fallback to simple attempts.
+    """
+    kc = _kite_client()
+    # Build common symbol variants to try
+    tries = []
+    # If user passed index like "NIFTY 50" allow "NSE:NIFTY 50" and "NSE:NIFTY"
+    symbol_clean = symbol.strip()
+    tries.append(f"{exchange}:{symbol_clean}")
+    if " " in symbol_clean:
+        tries.append(f"{exchange}:{symbol_clean.replace(' ', '')}")
+    # also try uppercase without spaces
+    tries.append(f"{exchange}:{symbol_clean.upper().replace(' ', '')}")
+    last_err = None
+    for t in tries:
+        try:
+            data = kc.ltp(t)
+            # kc.ltp returns dict keyed by the instrument string
+            return data.get(t, data)
+        except Exception as e:
+            last_err = e
+            logger.debug("ltp try failed for %s: %s", t, e)
+    raise RuntimeError(f"LTP fetch failed for {symbol} (tries: {tries}). last_err: {last_err}")
+
+def get_option_chain(symbol: str, strikes_range: int = 500, step: int = 50) -> Dict[str, Any]:
+    """
+    Build a local option chain snapshot around ATM.
+    - symbol: "NIFTY50" or "NIFTY" (main function callers pass "NIFTY50" etc).
+    - strikes_range: how far above/below ATM to query (default 500)
+    - step: strike step (50 for NIFTY)
+    Returns dict of CE/PE LTP keyed by strike.
+    """
+    kc = _kite_client()
+    # Get spot first
+    try:
+        spot_data = get_ltp("NSE", symbol)
+        spot = float(spot_data.get("last_price", 0) or spot_data.get("last_price", 0.0))
+    except Exception as e:
+        logger.warning("unable to fetch spot for option chain: %s", e)
+        raise
+
+    # Round ATM to nearest 'step'
+    atm = int(round(spot / step) * step)
+    strikes = list(range(atm - strikes_range, atm + strikes_range + step, step))
+    result = {"spot": spot, "atm": atm, "strikes": {}}
+
+    for st in strikes:
+        ce_sym = f"NFO:{symbol}{st}CE"
+        pe_sym = f"NFO:{symbol}{st}PE"
+        # try fetch ltp; if fails, continue
+        entry = {}
+        try:
+            ce = kc.ltp(ce_sym)
+            entry["CE"] = ce.get(ce_sym, ce)
+        except Exception:
+            entry["CE"] = None
+        try:
+            pe = kc.ltp(pe_sym)
+            entry["PE"] = pe.get(pe_sym, pe)
+        except Exception:
+            entry["PE"] = None
+        result["strikes"][st] = entry
+    return result
+
+def get_positions() -> List[Dict[str, Any]]:
+    """Return current positions (portfolio) via kite.positions()."""
+    kc = _kite_client()
+    return kc.positions()
+
+# -------- order placement helper --------
+def place_market_order(exchange: str, tradingsymbol: str, qty: int, transaction_type: str,
+                       product: str = "MIS", simulate: bool = False, order_type: str = "MARKET",
+                       price: Optional[float] = None) -> Dict[str, Any]:
+    """
+    Place a market (or limit if order_type provided) order. If simulate=True, return a mock.
+    Parameters align with main.place_trade_internal usage.
+    """
+    if simulate:
+        # return a deterministic simulated response
+        return {
+            "order_id": f"SIM-{int(time.time())}",
+            "status": "simulated",
+            "exchange": exchange,
+            "tradingsymbol": tradingsymbol,
+            "transaction_type": transaction_type,
+            "quantity": qty,
+            "product": product,
+            "order_type": order_type,
+        }
+
+    kc = _kite_client()
+    params = {
+        "exchange": exchange,
+        "tradingsymbol": tradingsymbol,
+        "transaction_type": transaction_type,
+        "quantity": qty,
+        "product": product,
+        "order_type": order_type,
+    }
+    if order_type.upper() == "LIMIT" and price is not None:
+        params["price"] = price
+
+    # place_order returns an order_id / acknowledgement dict
+    resp = kc.place_order(**params)
+    return resp
+
