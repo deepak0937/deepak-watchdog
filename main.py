@@ -388,6 +388,52 @@ def deepak_trend(x_admin_token: str = Header(None)):
         logger.exception("deepak trend+ error")
         return {"status": "error", "detail": str(e)}
 
+# -------- public summary (no auth) --------
+@app.get("/public/summary")
+def public_summary():
+    """
+    Safe, read-only snapshot of key trading stats for dashboards/ChatGPT.
+    No secrets or admin token required.
+    """
+    net_pnl = 0.0
+    open_positions = 0
+    try:
+        pos = zerodha.get_positions()
+        if isinstance(pos, dict) and "net" in pos:
+            pos = pos["net"]
+        for p in pos or []:
+            net_pnl += float(p.get("pnl") or p.get("unrealised") or 0)
+            qty = int(p.get("quantity") or p.get("net_quantity") or 0)
+            if qty:
+                open_positions += 1
+    except Exception:
+        # keep endpoint resilient even if Zerodha call fails
+        pass
+
+    equity = 0.0
+    cash = 0.0
+    try:
+        m = getattr(zerodha, "get_margin", None)
+        m = m() if callable(m) else {}
+        if isinstance(m, dict):
+            equity = float(m.get("equity") or 0)
+            cash = float(
+                (m.get("available") or {}).get("cash")
+                if isinstance(m.get("available"), dict)
+                else m.get("available_cash") or 0
+            )
+    except Exception:
+        pass
+
+    import datetime as dt
+    ist = dt.timezone(dt.timedelta(hours=5, minutes=30))
+    return {
+        "timestamp": dt.datetime.now(ist).isoformat(),
+        "net_pnl": round(net_pnl, 2),
+        "open_positions": open_positions,
+        "equity": round(equity, 2),
+        "cash": round(cash, 2),
+    }
 
 # -------- local dev runner (guarded) --------
 if __name__ == "__main__":
